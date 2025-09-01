@@ -6,7 +6,7 @@ This is the project repository for the paper:
 
 Robust Convex Model Predictive Control with collision avoidance guarantees for robot manipulators
 
-A preview version can be found at: https://arxiv.org/abs/2502.16205
+A preview version can be found at: https://arxiv.org/abs/2508.21677
 
 The signed configuration distance function (SCDF) is not included in this repo. The method is described in the paper: https://arxiv.org/abs/2502.16205
 
