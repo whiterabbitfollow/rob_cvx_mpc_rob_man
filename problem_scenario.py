@@ -12,9 +12,7 @@
 # OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
 # THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-
 import pickle
-from itertools import product
 
 import numpy as np
 import pinocchio as pin
@@ -32,39 +30,47 @@ class ProblemScenarioMassAllPin:
             v_amp_nom,
             u_amp_nom,
             dt,
-            error_frac=0.05
+            error_frac=0.05,
+            ignore_gravity=False
     ):
+        self.ignore_gravity = ignore_gravity
         self.p_cached_dir = p_cached_dir
         self.torque_limits = torque_limits
         self.v_amp_nom = v_amp_nom
         self.u_amp_nom = u_amp_nom
         self.dt = dt
 
+        self.position_limits = None
         self.frac = error_frac
-
+        self.path_urdf = path_urdf
         model_nom = pin.buildModelFromUrdf(path_urdf)
-        self.masses_nom = np.array([inertia.mass for inertia in model_nom.inertias])
-        self.dyn_nom = DynPinWrapper(model_nom)
-        self.model_nom = model_nom
 
-        self.model_sampled = pin.buildModelFromUrdf(path_urdf)
-        self.model_sampled, self.dyn_sampled = self.sample_model_within_bound(self.model_sampled)
+        self.masses_nom = np.array([inertia.mass for inertia in model_nom.inertias])
+        self.parameter_dim = self.masses_nom.size
+
+        self.model_nom = model_nom
+        self.dyn_nom = DynPinWrapper(model_nom)
 
         # Set GT model
+        # initialize model
         self.model_gt = pin.buildModelFromUrdf(path_urdf)
-        self.set_randomized_gt_model()
+        self.dyn_gt = DynPinWrapper(model_nom)
+        # sample within uncertainty range
+        self.dyn_err_gt = self.get_err_dyn_random()
 
         self.config_dim = self.model_gt.nq
 
-        with (p_cached_dir / "ps.pckl").open("wb") as fp:
+    def dump_to_cached_dir(self):
+        with (self.p_cached_dir / "ps.pckl").open("wb") as fp:
             pickle.dump(dict(
-                path_urdf=path_urdf,
-                p_cached_dir=p_cached_dir,
-                torque_limits=torque_limits,
-                v_amp_nom=v_amp_nom,
-                u_amp_nom=u_amp_nom,
-                dt=dt,
-                error_frac=error_frac
+                path_urdf=self.path_urdf,
+                p_cached_dir=self.p_cached_dir,
+                torque_limits=self.torque_limits,
+                v_amp_nom=self.v_amp_nom,
+                u_amp_nom=self.u_amp_nom,
+                dt=self.dt,
+                error_frac=self.frac,
+                ignore_gravity=self.ignore_gravity
             ),
                 fp
             )
@@ -77,31 +83,24 @@ class ProblemScenarioMassAllPin:
             **data
         )
 
-    def set_randomized_gt_model(self):
-        self.model_gt, self.dyn_gt = self.sample_model_within_bound(self.model_gt)
-        self.dyn_err_gt = DeltaDynPin(self.dyn_nom, self.dyn_gt)
+    def get_nominal_dynamics(self):
+        return self.dyn_nom
 
-    def sample_error_dynamics(self):
-        self.model_sampled, self.dyn_sampled = self.sample_model_within_bound(self.model_sampled)
-        return DeltaDynPin(self.dyn_nom, self.dyn_sampled)
+    def get_err_dynamics(self):
+        return self.dyn_err_gt
 
-    def sample_model_within_bound(self, model):
-        for m_gt, inertia in zip(self.masses_nom, model.inertias):
-            ratio_bias_err = 1 + np.random.uniform(-self.frac, self.frac)
-            inertia.mass = m_gt * ratio_bias_err
+    def get_err_dyn_random(self):
+        nr_masses = self.masses_nom.size
+        ratios = 1 + np.random.uniform(-self.frac, self.frac, size=(nr_masses,))
+        return self.get_err_dyn_from_ratios(ratios)
+
+    def get_err_dyn_from_ratios(self, ratios):
+        self.model_gt, self.dyn_gt = self.set_model_and_dynamics_from_ratios(self.model_gt, ratios)
+        self.dyn_err_gt = DeltaDynPin(nom=self.dyn_nom, sampled=self.dyn_gt, ignore_gravity=self.ignore_gravity)
+        return self.dyn_err_gt
+
+    def set_model_and_dynamics_from_ratios(self, model, ratios):
+        for m_gt, inertia, ratio in zip(self.masses_nom, model.inertias, ratios):
+            inertia.mass = m_gt * ratio # ratio within [1-frac, 1+frac]
         dyn = DynPinWrapper(model)
         return model, dyn
-
-    def get_error_dynamics_from_ratios(self, ratios):
-        model = self.model_sampled
-        for i, (m_gt, inertia) in enumerate(zip(self.masses_nom, model.inertias)):
-            inertia.mass = m_gt * ratios[i]
-        dyn = DynPinWrapper(model)
-        dyn_err = DeltaDynPin(self.dyn_nom, dyn)
-        return dyn_err
-
-    def get_ratios_parameters_vertices(self):
-        n_masses = len(self.masses_nom)
-        n_all = n_masses
-        ratios_cube =  1 + np.vstack(list(product(*([(-1, 1)] * n_all)))) * self.frac
-        return ratios_cube

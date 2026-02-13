@@ -17,14 +17,16 @@ import logging
 import pickle
 import sys
 
+import cvxpy as cp
 import numpy as np
 import pandas as pd
 
-from controllers.common import run_controller_in_corridor
-from controllers.flexible_tube_controller import FlexibleTubeNaiveCorridorController
-from controllers.nom_controller import NominalController
-from controllers.tube_controller import RobustCorridorController
-from aux import interpolate_equidistant
+
+from controllers.common import load_all_controllers
+from aux import interpolate_equidistant, TimeStepIntegratorContinuous, TimeStepIntegratorDiscrete
+from corridor_simulators.flexible_tube import FlexibleTubeSimulator
+from corridor_simulators.nom import NomSimulator
+from corridor_simulators.tube import TubeSimulator
 from examples.planar_two_dof import P_EXAMPLE_2_DOF
 from examples.planar_two_dof.world import DiskWorld
 from path_planner.rrt_bi_dir import is_collision_free_bisection, rrt_bi_dir_plan, simple_shortcut
@@ -32,7 +34,7 @@ from problem_scenario import ProblemScenarioMassAllPin
 
 
 
-def sample_query(world, dist_margin=0):
+def sample_query(world, dist_margin=0.):
     while True:
         q_s = world.sample_coll_free()
         r_s = world.sdf(q_s)
@@ -48,7 +50,7 @@ def sample_query(world, dist_margin=0):
     return q_s, q_g
 
 
-def run_experiments_from_dir(p_d, nr_runs=1, save_runs=False, seed=0):
+def run_experiments_from_dir(p_d, nr_runs=10,  seed=0, goal_tol = 0.01, save_results=True):
     d_name = p_d.name
     p_cached_dir = p_d
     ps = ProblemScenarioMassAllPin.from_cached_dir(
@@ -61,47 +63,18 @@ def run_experiments_from_dir(p_d, nr_runs=1, save_runs=False, seed=0):
     handler.setFormatter(formatter)
     logger.addHandler(handler)
     config_dim = ps.config_dim
-    m_x = config_dim * 2
-    m_u = config_dim
-    m_p = config_dim
-
-    Q = np.eye(m_x) * 10
-    Q[config_dim:, config_dim:] *= .01
-    Q_e = np.eye(m_x) * 1e4
-    R = np.eye(m_u) * 1e-3
-
-    N = 20
-    goal_tol = 0.01
-
-    fcont = FlexibleTubeNaiveCorridorController.from_cached_dir(
-        p_cached_dir,
-        Q,
-        Q_e,
-        R,
-        N=N
-    )
-    rcont = RobustCorridorController.from_cached_dir(
-        p_cached_dir,
-        Q,
-        Q_e,
-        R,
-        N
-    )
-    nom_cont = NominalController(
-        fcont.A, fcont.B, Q, Q_e, R, N, u_lim=ps.u_amp_nom, v_lim=ps.v_amp_nom, p_amp=np.pi,
-    )
+    if not (ps.p_cached_dir / "ftube_controller.npz").exists():
+        return
+    fcont, rcont, nom_cont = load_all_controllers(ps, horizon_length=20)
+    for c in (fcont, rcont, nom_cont):
+        c.set_solver(cp.CLARABEL)
     np.random.seed(seed)
-    controllers = [
-        fcont,
-        rcont,
-        nom_cont,
-        nom_cont
-    ]
-    extra_kwargs = [
-        None, #set {"aux_controller_steps": 4}, if aux steps needed
-        None,
-        None,
-        {"ignore_me": True},
+    world = DiskWorld.from_example()
+    simulators = [
+        FlexibleTubeSimulator(fcont, TimeStepIntegratorContinuous(dt=ps.dt), world, aux_controller_steps=1),
+        TubeSimulator(rcont, TimeStepIntegratorContinuous(dt=ps.dt), world, aux_controller_steps=1),
+        NomSimulator(nom_cont, TimeStepIntegratorContinuous(dt=ps.dt), world),
+        NomSimulator(nom_cont, TimeStepIntegratorDiscrete(A=nom_cont.A, B=nom_cont.B, ignore_me=True), world)
     ]
     names = [
         "ft",
@@ -109,13 +82,19 @@ def run_experiments_from_dir(p_d, nr_runs=1, save_runs=False, seed=0):
         "nom",
         "nom_star"
     ]
-    corridor_results = []
+    corridor_statistics = []
+    # computation_times = defaultdict(list)
+
     iter_obj = list(range(nr_runs))
-    world = DiskWorld.from_example()
+
+    dyn_nom = ps.get_nominal_dynamics()
+
     def is_collision_free_transition(q_1, q_2):
         return is_collision_free_bisection(q_1, q_2, sdf_func=world.sdf)
+
+
     for run_nr in iter_obj:
-        ps.set_randomized_gt_model()
+        dyn_err = ps.get_err_dyn_random()
         d_margin = 0.1
         q_s, q_g = sample_query(world, dist_margin=d_margin)
         world.dist_margin = d_margin
@@ -140,54 +119,38 @@ def run_experiments_from_dir(p_d, nr_runs=1, save_runs=False, seed=0):
         path_radii = world.sdf(path_centers)
         world.dist_margin = 0
         logger.debug(f"---run {run_nr}")
-        for cont, extra_kw, name in zip(controllers, extra_kwargs, names):
-            if cont is None:
+        if save_results:
+            p_r = p_d / "corridors"
+            p_r.mkdir(exist_ok=True)
+            np.savez(p_r / f"corr_{run_nr}.npz", path_centers=path_centers, path_radii=path_radii)
+        for simulator, name in zip(simulators, names):
+            if simulator.cont is None:
                 continue
-            extra_kw = extra_kw or {}
-            (status, ts_goal), all_results = run_controller_in_corridor(
-                ps,
-                cont,
+            simulator.integrator.set_dyns(dyn_nom, dyn_err)
+            (status, ts_goal), all_results = simulator.simulate(
                 path_centers,
                 path_radii,
-                world=world,
-                nr_steps=1000,
-                ignore_gravity=True,
+                nr_steps=1_000,
                 goal_tol=goal_tol,
-                verbose=False,
-                **extra_kw
+                verbose=False
             )
-            if len(all_results) > 1:
-                comp_times = np.vstack(
-                    [
-                        (time_e, time_e_corridor_planning, time_mpc_e)
-                        for *_, (time_e, time_e_corridor_planning, time_mpc_e) in all_results
-                    ]
-                )
-                mean_time_all, mean_time_corr, mean_time_mpc = comp_times[1:].mean(axis=0)
-            else:
-                mean_time_all, mean_time_corr, mean_time_mpc = 3 * [np.nan]
             nr_steps = len(all_results)
+            if save_results:
+                p_r = p_d / "motion"
+                p_r.mkdir(exist_ok=True)
+                cont_f_name = f'{name}~{run_nr}.pckl'
+                with (p_r / cont_f_name).open("wb") as fp:
+                    pickle.dump(all_results, fp)
             logger.debug(f"{name} time in goal: {status} {ts_goal} nr_steps: {nr_steps}")
-            if save_runs:
-                p_res = P_EXAMPLE_2_DOF / "debug" / p_cached_dir.name / name
-                if not p_res.exists():
-                    p_res.mkdir(exist_ok=True, parents=True)
-                if p_res.exists():
-                    cont_f_name = f'{name}~{run_nr}.pckl'
-                    with (p_res / cont_f_name).open("wb") as fp:
-                        pickle.dump((path_centers, all_results), fp)
-            corridor_results.append(
+            corridor_statistics.append(
                 {
-                    "run": run_nr,
+                    "run_nr": run_nr,
                     "name": name,
                     "t2g": ts_goal,
-                    "comp_time_ee": mean_time_all,
-                    "comp_time_corr": mean_time_corr,
-                    "comp_time_mpc": mean_time_mpc,
                     "status": status
                 }
             )
-    df = pd.DataFrame(corridor_results)
+    df = pd.DataFrame(corridor_statistics)
     df.to_csv(p_cached_dir / "results.csv", index=False)
     path_str = str(p_cached_dir / "results.csv")
     logger.debug(f"saved all results at {path_str}")
@@ -197,4 +160,4 @@ def run_experiments_from_dir(p_d, nr_runs=1, save_runs=False, seed=0):
 
 if __name__ == "__main__":
     p_d = P_EXAMPLE_2_DOF / "data" / "dof_2_ef_0.1"
-    run_experiments_from_dir(p_d, nr_runs=10, save_runs=True)
+    run_experiments_from_dir(p_d, nr_runs=10, save_results=True, seed=0)

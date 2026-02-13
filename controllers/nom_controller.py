@@ -68,14 +68,20 @@ class NominalController:
             self.X[m:, :] >= -v_lim
         ]
         self.problem = cp.Problem(cp.Minimize(objective), const)
+        self.use_solver = cp.MOSEK
 
-    def solve(self, x_0, cs, rs, x_g_v):
+    def set_parameter_values(self, x_0, cs, rs, x_g_v):
         self.x_start.value = x_0
         self.x_g.value = x_g_v
         self.cs.value = cs[:self.ball_dim]
         self.rs.value = rs
+
+    def set_solver(self, solver):
+        self.use_solver = solver
+
+    def solve(self):
         try:
-            self.loss = self.problem.solve(solver=cp.CLARABEL)
+            self.loss = self.problem.solve(solver=self.use_solver)
             self.status = self.problem.status
             status = self.X.value is not None
         except:
@@ -95,3 +101,6 @@ class NominalController:
 
     def get_predicted_traj(self):
         return self.X.value
+
+    def __str__(self):
+        return f"nom({self.N})"

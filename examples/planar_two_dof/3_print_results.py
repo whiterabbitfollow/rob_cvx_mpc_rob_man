@@ -18,18 +18,30 @@ import pandas as pd
 from examples.planar_two_dof import P_EXAMPLE_2_DOF
 
 df = pd.read_csv(P_EXAMPLE_2_DOF / "data" / "dof_2_ef_0.1" / "results.csv")
-df["reached_goal"] = df["status"] == "success"
+
+mask_success = df["status"] == "success"
+
+df["reached_goal"] = mask_success
 df.rename(
     mapper={
-        "t2g": "time_steps_to_goal",
-        "comp_time_ee": "iteration_computation_time"
+        "t2g": "time_steps_to_goal"
     },
     axis=1
     ,
     inplace=True
 )
-df_g = df.groupby("name")
-print(df_g[["reached_goal", "iteration_computation_time"]].mean())
 
-df_g = df.groupby(["run", "name"])["time_steps_to_goal"]
-print(df_g.mean())
+df_g = df.groupby("name")
+print("---Success rate:")
+print(df_g[["reached_goal"]].mean())
+
+# Ignoring nominal, since only infeasible
+df_ = df[df["name"] != "nom"]
+df_g_ = df_.groupby("run_nr")
+mask_all_succ = df_g_["reached_goal"].all()
+runs_all_planners_succ = mask_all_succ.index.values[mask_all_succ]
+mask__ = df_["run_nr"].isin(runs_all_planners_succ)
+df_g = df_[mask__].groupby("name")["time_steps_to_goal"]
+
+print("---Mean time to goal:")
+print(df_g.mean().sort_values())

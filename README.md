@@ -1,46 +1,35 @@
+# Robust Convex Model Predictive Control with collision avoidance guarantees for robot manipulators
+
 <p align="center">
 <img src="demo.gif"/>
 </p>
 
 This is the project repository for the paper:
 
-Robust Convex Model Predictive Control with collision avoidance guarantees for robot manipulators
+https://arxiv.org/abs/2502.16205
 
-A preview version can be found at: https://arxiv.org/abs/2508.21677
+The neural signed configuration distance function (nSCDF) is not included in this repo. The method is described in the paper: 
 
-The signed configuration distance function (SCDF) is not included in this repo. The method is described in the paper: https://arxiv.org/abs/2502.16205
+https://arxiv.org/abs/2502.16205
+
+with corresponding repo:
+
+https://github.com/whiterabbitfollow/nSCDF_PBRM
 
 Overview of repository:
 ```bash
 .
 ├── controllers
-│   ├── common.py
-│   ├── flexible_tube_controller.py
-│   ├── nom_controller.py
-│   └── tube_controller.py
+├── corridor_simulators
 ├── examples
 │   └── planar_two_dof
-│       ├── manipulator
-│       ├── 1_run_offline_pipline.py
-│       ├── 2_run_all.py
-│       ├── 3_print_results.py
-│       ├── 4_visualize_mpcs.py
-│       ├── __init__.py
-│       └── world.py
-├── path_planner
-│   ├── core.py
-│   └── rrt_bi_dir.py
-├── aux.py
-├── demo.gif
-├── LICENSE
-├── offline_pipeline.py
-├── problem_scenario.py
-├── README.md
-└── requirements.txt
+│       ├── data
+│       └── manipulator
+└── path_planner
 ```
 
 ### Requirements:
-- Mosek license
+- Mosek license (optional)
 - Python 3.10
 
 ### Installation and setup:
@@ -50,23 +39,37 @@ Overview of repository:
 
 2. Add project folder to python path
 
-`export PYTHONPATH="$(pwd):$PYTHONPATH"`
+`export PYTHONPATH="$(pwd):$PYTHONPATH`
 
 ### Examples:
 #### Planar 2 DOF manipulator
-1. Run offline pipline 
+
+The following demonstrates how to run the offline pipeline for a planar 2 DOF manipulator with 10 % uncertainty link masses.
+
+##### Offline pipeline (optional)
+1. A Mosek license is required to run the offline pipeline.
+2. Install cvxpy to support Mosek:
+
+`pip install cvxpy[CBC,CVXOPT,GLOP,GLPK,GUROBI,MOSEK,PDLP,SCIP,XPRESS]`
+
+3. Run offline pipline:
 
 `python examples/planar_two_dof/1_run_offline_pipline.py`
 
-2. Run all methods
+4. List offline results 
+
+`ls examples/planar_two_dof/data/dof_2_ef_0.1`
+
+##### Online Corridor Control
+1. Run all methods:
 
 `python examples/planar_two_dof/2_run_all.py`
 
-3. Print results
+2. Print results:
 
 `python examples/planar_two_dof/3_print_results.py`
 
-4. Run animation of selected method
+3. Run animation of selected method:
 
 `python examples/planar_two_dof/4_visualize_mpcs.py --method {method_name}`
 

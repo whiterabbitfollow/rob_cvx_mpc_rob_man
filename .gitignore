@@ -1,4 +1,15 @@
-**/data/
+**/*.bcf
+**/*.nav
+**/*.out
+**/*.run.xml
+**/*.snm
+**/*.toc
+
+experiments/irb/manipulator/meshes/*
+**/*.mp4
+**/vanilla_dof_3_128
+**/not_release
+**/data*
 **/debug
 **/scratches
 *.npz
@@ -26,6 +37,7 @@
 # C extensions
 *.so
 
+*.urdf
 # Distribution / packaging
 .Python
 develop-eggs/

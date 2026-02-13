@@ -77,7 +77,7 @@ def render_rigid_tube(world, ax1, ax2, inputs, outputs):
 
 
 def render_flexible_tube(world, ax1, ax2, inputs, outputs):
-    (x, z_g, cs, rs) = inputs
+    (x, z_g, cs, rs, s_0) = inputs
     (Z, U, S, r_p) = outputs
     q, _ = np.split(x, 2)
     world.render_world_space(ax1, q=q)
@@ -102,7 +102,6 @@ def render_flexible_tube(world, ax1, ax2, inputs, outputs):
     )
 
 if __name__ == "__main__":
-
     parser = argparse.ArgumentParser()
     names = (
         "nom_star",
@@ -113,19 +112,24 @@ if __name__ == "__main__":
     args = parser.parse_args()
     f_name = args.method
     world = DiskWorld.from_example()
-    path_debug = P_EXAMPLE_2_DOF / "debug" / "dof_2_ef_0.1" / f_name
-    for p in sorted(list(path_debug.iterdir())):
+    path_data = P_EXAMPLE_2_DOF / "data" / "dof_2_ef_0.1"
+    paths = list(sorted((path_data / "motion").glob(f"{f_name}*.pckl")))
+    for p in paths:
+        _, nr = p.stem.rsplit("~", 1)
+        nr = int(nr)
+        data_corr = np.load(path_data / "corridors" / f"corr_{nr}.npz")
+        path_centers = data_corr["path_centers"]
         with p.open("rb") as fp:
-            path_centers, all_results = pickle.load(fp)
+            all_results = pickle.load(fp)
         q_s, q_g = path_centers[[0, -1]]
         path_radii = world.sdf(path_centers)
-        for inputs, outputs, (time_e, time_e_corridor_planning, time_mpc_e) in all_results:
+        for results in all_results:
             if f_name == "nom_star" or f_name =="nom":
-                render_nominal(world, ax1, ax2, inputs, outputs)
+                render_nominal(world, ax1, ax2, results.inputs, results.outputs)
             elif f_name == "rt":
-                render_rigid_tube(world, ax1, ax2, inputs, outputs)
+                render_rigid_tube(world, ax1, ax2, results.inputs, results.outputs)
             elif f_name == "ft":
-                render_flexible_tube(world, ax1, ax2, inputs, outputs)
+                render_flexible_tube(world, ax1, ax2, results.inputs, results.outputs)
             plt.pause(.01)
             for ax in (ax1, ax2):
                 ax.cla()

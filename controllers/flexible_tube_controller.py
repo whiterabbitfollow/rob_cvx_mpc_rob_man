@@ -20,7 +20,6 @@ from aux import compute_projected_matrix, get_linear_ordered_state_constraints, 
 
 
 class FlexibleTubeNaiveCorridorController:
-
     """
         Implementation of our suggested controller, referred to as flexible tube in paper
     """
@@ -46,11 +45,12 @@ class FlexibleTubeNaiveCorridorController:
             P_sqrt,
             P_inv_sqrt,
             K,
-            w_s,
             ball_dim=None,
             eps=1e-6
     ):
         P_sqrt_B = np.linalg.norm(P_sqrt @ B, ord=2)
+        self.P_sqrt_B = P_sqrt_B
+        self.use_solver = cp.MOSEK
         m_x, m_u = B.shape
         m_p = int(m_x / 2)
         self.m_p = m_p
@@ -61,34 +61,36 @@ class FlexibleTubeNaiveCorridorController:
 
         X = cp.Variable((m_x, N + 1), name="X")
         U = cp.Variable((m_u, N), name="U")
-        S = cp.Variable((N + 1, ), name="S")
+        S = cp.Variable((N + 1,), name="S")
+
         x_0 = cp.Parameter(m_x, name="x_0")
         x_g_v = cp.Parameter(m_x, name="x_g_v")
-
+        s_0 = cp.Parameter(name="s_0")
         self.rho = rho
         rho_d = rho + L
         self.rho_d = rho_d
+
+        delta_f = c / (1 - rho_d)
+
         assert rho_d < 1, "rho + L has to be smaller than 1"
         objective = 0
         for i in range(N):
             objective += cp.quad_form(X[:, i] - X[:, -1], Q) + cp.quad_form(U[:, i], R)
         objective += cp.quad_form(X[:, -1] - x_g_v, Q_e)
-        objective += S[:-1].sum() * w_s
-        objective += S[-1] * (w_s / (1 - rho_d))
 
         self.c_x = np.linalg.norm(P_inv_sqrt.T @ A_x.T, axis=0)
         self.c_u = np.linalg.norm((K @ P_inv_sqrt).T @ A_u.T, axis=0)
         self.b_x = b_x
         self.b_u = b_u
 
-        cs  = cp.Parameter((self.ball_dim, N+1), name="cs")
-        rs  = cp.Parameter((N+1, ), name="rs")
+        cs = cp.Parameter((self.ball_dim, N + 1), name="cs")
+        rs = cp.Parameter((N + 1,), name="rs")
 
         const = ([
-            cp.norm(P_sqrt @ (X[:, 0] - x_0)) <= S[0],
+            cp.norm(P_sqrt @ (X[:, 0] - x_0)) <= S[0] - s_0,
             X[:, 1:] == A @ X[:, :-1] + B @ U,
             X[m_p:, -1] == np.zeros(m_p, ),
-            A_u @  U <= b_u[:, None] - cp.multiply(self.c_u[:, None], S[None, :-1]),
+            A_u @ U <= b_u[:, None] - cp.multiply(self.c_u[:, None], S[None, :-1]),
             A_x @ X[:, :-1] <= b_x[:, None] - cp.multiply(self.c_x[:, None], S[None, :-1]),
             A_x @ X[:, -1] <= b_x - self.c_x * (S[-1] + eps),
             cp.norm(X[:m_p] - cs, axis=0) <= rs - r_p_0 * S,
@@ -98,11 +100,13 @@ class FlexibleTubeNaiveCorridorController:
                     (
                             S[:-1] * rho_d
                             +
-                            P_sqrt_B * (a * cp.norm(U, axis=0) + b * cp.norm(X[m_p:, :-1], axis=0) + c)
+                            (a * cp.norm(U, axis=0) + b * cp.norm(X[m_p:, :-1], axis=0) + c)
                     )
             ),
+            S[-1] >= delta_f
         ]
         )
+        self.s_0 = s_0
         self.r_p_0 = r_p_0
         self.cs = cs
         self.rs = rs
@@ -124,13 +128,18 @@ class FlexibleTubeNaiveCorridorController:
         self.a = a
         self.b = b
         self.c = c
+        self.delta_f = delta_f
+        self.use_compiled = False
         self.problem = cp.Problem(
             cp.Minimize(objective),
             constraints=const
         )
 
-    def compute_model_error_bound(self, v, x):
-        return self.a * np.linalg.norm(v) + self.b * np.linalg.norm(x[:self.m_p])
+    def set_solver(self, solver):
+        self.use_solver = solver
+
+    def compute_model_error_bound(self, u, x):
+        return self.a * np.linalg.norm(u) + self.b * np.linalg.norm(x[self.m_p:]) + self.c
 
     @classmethod
     def from_cached_dir(
@@ -140,26 +149,21 @@ class FlexibleTubeNaiveCorridorController:
             Q_e,
             R,
             N,
-            weight_balls=1,
-            ignore_gravity=True,
             **kwargs
     ):
         data_controller = np.load(p_cached_dir / "ftube_controller.npz")
         data_constraints = np.load(p_cached_dir / "data_constraints.npz")
-        data_model_error = np.load(p_cached_dir / "data_model_error.npz")
+        data_model_error = np.load(p_cached_dir / "data_ME_and_DE_constants.npz")
         data_system = np.load(p_cached_dir / "system.npz")
         A, B = data_system["A"], data_system["B"]
-        P, E, rho, L, K, P_sqrt, P_inv_sqrt = [data_controller[name] for name in ("P", "E", "rho", "L", "K", "P_sqrt", "P_inv_sqrt")]
+        P, E, rho, L, K, P_sqrt, P_inv_sqrt = [data_controller[name] for name in
+                                               ("P", "E", "rho", "L", "K", "P_sqrt", "P_inv_sqrt")]
         m_u, m_x = K.shape
         m_p = int(m_x / 2)
         v_amp, u_amp = data_constraints["v_amp"], data_constraints["u_amp"]
         a_me = data_model_error["a"]
         b_me = data_model_error["b"]
-        if not ignore_gravity:
-            c_me = data_model_error["c"]
-        else:
-            c_me = 0
-
+        c_me = data_model_error["c"]
         A_x, b_x = get_linear_ordered_state_constraints(m_p, p_amp=np.pi, v_amp=v_amp)
         A_u, b_u = get_linear_box_constraints(m_u, amp=u_amp)
         return cls(
@@ -182,31 +186,51 @@ class FlexibleTubeNaiveCorridorController:
             P_sqrt,
             P_inv_sqrt,
             K,
-            w_s=weight_balls,
             **kwargs
         )
 
-    def solve(self, x_0, cs, rs, x_g_v):
+    def set_parameter_values(self, x_0, cs, rs, x_g_v, s_0):
         self.x_0.value = x_0
-        self.x_g_v.value = x_g_v
         self.cs.value = cs[:self.ball_dim]
         self.rs.value = rs
-        self.problem.solve()
+        self.x_g_v.value = x_g_v
+        self.s_0.value = s_0
+
+    def solve(self):
+        if self.use_compiled:
+            self.problem.solve(method='CPG', verbose=False)  # updated_params = ['A', 'b']
+        else:
+            self.problem.solve(solver=self.use_solver)
         return self.X.value is not None
 
-    def get_solved_control(self, x, k = 0):
+    def get_solved_control(self, x, k=0):
         x_nom = self.X.value[:, k]
         u_nom = self.U.value[:, k]
         e = (x - x_nom)
         u = u_nom + self.K @ e
         return u
 
+    def predict_tube_size(self, x_0, M):
+        S = self.S.value
+        U_n = np.linalg.norm(self.U.value, axis=0)
+        Xp_n = np.linalg.norm(self.X.value[self.m_p:, :-1], axis=0)
+        betas = (self.a * U_n + self.b * Xp_n + self.c)
+        s = np.linalg.norm(self.P_sqrt @ (self.X.value[:, 0] - x_0))
+        for m in range(M):
+            s = s * self.rho_d + betas[m]
+        return s
+
     def get_predicted_traj(self):
         return self.X.value
+
+    def get_predicted_state(self, k):
+        return self.X.value[:, k]
 
     def get_solution_results(self):
         return self.X.value, self.U.value, self.S.value, self.r_p_0
 
     def get_solution_inputs(self):
-        return self.x_0.value, self.x_g_v.value, self.cs.value, self.rs.value
+        return self.x_0.value, self.x_g_v.value, self.cs.value, self.rs.value, self.s_0.value
 
+    def __str__(self):
+        return f"flexible({self.N})"

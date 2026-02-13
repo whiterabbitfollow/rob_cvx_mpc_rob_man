@@ -11,15 +11,52 @@
 # CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 # OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
 # THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
-
-import functools
+from itertools import product
 
 import control as ct
 from control import matlab
+import cvxpy as cp
 import numpy as np
-from scipy.spatial import ConvexHull
 import pinocchio as pin
+from scipy.integrate import solve_ivp
+
+
+
+
+def optimize_simple(cs, rs):
+    M, N = cs.shape
+    X = cp.Variable((M, N))
+    objective = cp.norm(X[1:] - X[:-1], axis=1).sum()
+    const = [
+        cp.norm(X - cs, axis=1) <= rs,
+        X[0] == cs[0],
+        X[-1] == cs[-1]
+    ]
+    problem = cp.Problem(cp.Minimize(objective), const)
+    problem.solve()
+    return X.value
+
+
+def get_tracking_path_clearance(cs, rs, r_margin = 0.15):
+    mask = rs > r_margin
+    indxs, = np.nonzero(mask)
+    indxs_jump, = np.nonzero(np.diff(indxs) > 1)
+    indxs_cont = np.split(indxs, indxs_jump + 1)
+    path_sol = cs.copy()
+    for ind in indxs_cont:
+        path_sc = optimize_simple(cs[ind], rs[ind] - r_margin)
+        path_sol[ind] = path_sc
+    return path_sol
+
+
+def get_hyper_box_corners(dim, value):
+    return np.vstack(list(product(*([(-1, 1)] * dim)))) * value
+
+
+def get_hyper_box_corners_from_limits(limits):
+    # limits [dim, 2]
+    return np.vstack(list(product(*limits)))
+
 
 
 def get_linear_box_constraints(m, amp=1.):
@@ -154,37 +191,100 @@ class DynPinWrapper:
 
 class DeltaDynPin:
 
-    def __init__(self, nom : DynPinWrapper, sampled : DynPinWrapper):
+    def __init__(self, nom : DynPinWrapper, sampled : DynPinWrapper, ignore_gravity=False):
         self.nom = nom
         self.sampled = sampled
+        self.config_dim = sampled.config_dim
+        self.ignore_gravity = ignore_gravity
 
-    def __getattr__(self, item):
-        nom_func = getattr(self.nom, item)
-        sampled_func = getattr(self.sampled, item)
-        def diff_method(*args, **kwargs):
-            return sampled_func(*args, **kwargs) - nom_func(*args, **kwargs)
-        return diff_method
+    def gravity(self, q):
+        if self.ignore_gravity:
+            return np.zeros(self.config_dim)
+        else:
+            return self.sampled.gravity(q) - self.nom.gravity(q)
 
-    def __dir__(self):
-        all_methods = [{name for name in dir(a) if callable(getattr(a, name))} for a in (self.nom, self.sampled)]
-        shared_methods = set(list(functools.reduce(lambda x, y: x & y, all_methods)))
-        return shared_methods | set(super().__dir__())
+    def coroli(self, q, q_d):
+        return self.sampled.coroli(q, q_d) - self.nom.coroli(q, q_d)
+
+    def coroli_matrix(self, q, q_d):
+        return self.sampled.coroli_matrix(q, q_d) - self.nom.coroli_matrix(q, q_d)
+
+    def mass_matrix(self, q):
+        return self.sampled.mass_matrix(q) - self.nom.mass_matrix(q)
 
 
-def compute_model_error(problem, q, q_d, u, ignore_gravity=False):
-    dyn_nom = problem.dyn_nom
-    dyn_err_gt = problem.dyn_err_gt
+def compute_model_error(dyn_nom, dyn_err, q, q_d, u):
     M_nom = dyn_nom.mass_matrix(q)
-    M_err = dyn_err_gt.mass_matrix(q)
-
+    M_err = dyn_err.mass_matrix(q)
     M = M_nom + M_err
     M_inv = np.linalg.inv(M)
     M_tilde = M_inv @ M_err
+    c_err = dyn_err.coroli(q, q_d)
+    grav_err = dyn_err.gravity(q)
+    delta = - M_tilde @ u - M_inv @ c_err - M_inv @ grav_err
+    return delta
 
-    c_err = dyn_err_gt.coroli(q, q_d)
-    if ignore_gravity:
-        grav_err = np.zeros_like(q)
-    else:
-        grav_err = dyn_err_gt.gravity(q)
-    delta_norm = - M_tilde @ u - M_inv @ c_err - M_inv @ grav_err
-    return delta_norm
+
+class TimeStepIntegratorContinuous:
+
+    def __init__(self, dyn_nom=None, dyn_err=None, dt=1e-2):
+        self.dyn_nom = dyn_nom
+        self.dyn_err = dyn_err
+        self.dt = dt
+
+    def set_dyns(self, dyn_nom, dyn_err):
+        self.dyn_nom = dyn_nom
+        self.dyn_err = dyn_err
+
+    def solve_time_step(self, x, u):
+        # simulate continuous ODE (with model error)
+        results = solve_ivp(self._x_dot_fl, [0, self.dt], x, args=(u,))
+        x_ode = results.y[:, -1]
+        return x_ode
+
+    def get_noise(self, x, u):
+        q, q_d = np.split(x, 2)
+        delta_me = compute_model_error(self.dyn_nom, self.dyn_err, q, q_d, u)
+        return delta_me
+
+    def _x_dot_fl(self, t, x_t, q_dd_t):
+        # simulate continuous FL with model-error, eq (3)
+        q_t, q_d_t = np.split(x_t, 2)
+        # compute model-error, i.e. delta_theta eq (4)
+        delta_theta_t = compute_model_error(self.dyn_nom, self.dyn_err, q_t, q_d_t, q_dd_t)
+        x_t_dot = np.r_[
+            q_d_t,
+            q_dd_t + delta_theta_t
+        ]
+        return x_t_dot
+
+
+class TimeStepIntegratorDiscrete:
+
+    def __init__(self, A, B, dyn_nom=None, dyn_err=None, ignore_me=False):
+        self.dyn_nom = dyn_nom
+        self.dyn_err = dyn_err
+        self.A = A
+        self.B = B
+        self.ignore_me = ignore_me
+
+    def set_dyns(self, dyn_nom, dyn_err):
+        self.dyn_nom = dyn_nom
+        self.dyn_err = dyn_err
+
+    def get_noise(self, x, u):
+        q, q_d = np.split(x, 2)
+        delta_me = compute_model_error(self.dyn_nom, self.dyn_err, q, q_d, u)
+        return delta_me
+
+    def solve_time_step(self, x, u):
+        A, B = self.A, self.B
+        q, q_d = np.split(x, 2)
+        if self.ignore_me:
+            noise = 0
+        else:
+            delta_me = compute_model_error(self.dyn_nom, self.dyn_err, q, q_d, u)
+            noise = B @ delta_me
+        return A @ x + B @ u + noise
+
+

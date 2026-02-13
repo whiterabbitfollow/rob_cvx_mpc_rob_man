@@ -99,6 +99,7 @@ class RobustCorridorController:
             cp.Minimize(objective),
             constraints=const
         )
+        self.use_solver = cp.MOSEK
 
     @classmethod
     def from_cached_dir(
@@ -148,12 +149,18 @@ class RobustCorridorController:
             **kwargs
         )
 
-    def solve(self, x_0, cs, rs, x_g_v):
+    def set_parameter_values(self, x_0, cs, rs, x_g_v):
         self.x_0.value = x_0
         self.zg.value = x_g_v
-        self.cs.value = cs[:self.ball_dim]
+        self.cs.value = cs # [:self.ball_dim]
         self.rs.value = rs
-        self.problem.solve()
+
+
+    def set_solver(self, solver):
+        self.use_solver = solver
+
+    def solve(self):
+        self.problem.solve(solver=self.use_solver)
         return self.Z.value is not None
 
     def get_solved_control(self, x, k = 0):
@@ -167,8 +174,14 @@ class RobustCorridorController:
     def get_predicted_traj(self):
         return self.Z.value
 
+    def get_predicted_state(self, k):
+        return self.Z.value[:, k]
+
     def get_solution_results(self):
         return (self.Z.value, self.V.value, self.r_p)
 
     def get_solution_inputs(self):
         return self.x_0.value, self.zg.value, self.cs.value, self.rs.value
+
+    def __str__(self):
+        return f"tube({self.N})"
