@@ -6,7 +6,7 @@
 
 This is the project repository for the paper:
 
-https://arxiv.org/abs/2502.16205
+https://arxiv.org/abs/2508.21677
 
 The neural signed configuration distance function (nSCDF) is not included in this repo. The method is described in the paper: 
 
